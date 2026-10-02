@@ -56,7 +56,8 @@ the plugin. Removing the plugin restores Unraid's binary.
 
 ## Configuration
 
-`/boot/config/plugins/mover.filter/filters.conf` — one glob per line, matched
+**Settings → Utilities → Mover Filter**, or edit
+`/boot/config/plugins/mover.filter/filters.conf` directly — one glob per line, matched
 against the full path of each file the mover considers. Patterns are implicitly
 anchored, so `*.part` means "any path ending in `.part`".
 

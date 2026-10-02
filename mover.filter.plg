@@ -2,13 +2,15 @@
 <!DOCTYPE PLUGIN [
 <!ENTITY name      "mover.filter">
 <!ENTITY author    "jasperchan">
-<!ENTITY version   "2026.10.02">
+<!ENTITY version   "2026.10.02b">
+<!ENTITY launch    "Settings/MoverFilter">
 <!ENTITY gitURL    "https://raw.githubusercontent.com/jasperchan/unraid-mover-filter/main">
 <!ENTITY pluginURL "&gitURL;/&name;.plg">
 ]>
 <PLUGIN name="&name;"
         author="&author;"
         version="&version;"
+        launch="&launch;"
         pluginURL="&pluginURL;"
         icon="filter"
         min="6.9.0"
@@ -17,37 +19,67 @@
 <CHANGES>
 ##Mover Filter
 
-Excludes files from Unraid's mover by filename pattern. Patterns are globs, one
-per line, in `/boot/config/plugins/mover.filter/filters.conf`. Defaults to
-`*.part` so in-progress downloads are never moved from the cache pool to the
-array mid-write.
+Excludes files from Unraid's mover by filename pattern. Configure under
+**Settings -> Utilities -> Mover Filter**. Defaults to `*.part` so
+in-progress downloads are never moved off the cache pool mid-write.
 
-###&version;
+###2026.10.02b
+- Add a settings page under Settings -> Utilities -> Mover Filter.
+
+###2026.10.02a
+- Validate the wrapped binary before installing; refuse to install if unusable.
+- Warn if this Unraid build's mover does not route through the wrapped binary.
+- Ignore a catch-all pattern that would silently stop the mover entirely.
+- Fail open: any problem reading the config passes all files through.
+- Record the Unraid version at install time.
+
+###2026.10.02
 - Initial release.
 </CHANGES>
 
 <FILE Run="/bin/bash">
 <INLINE><![CDATA[
 PLUGDIR=/boot/config/plugins/mover.filter
+EMHTTP=/usr/local/emhttp/plugins/mover.filter
 CONF=$PLUGDIR/filters.conf
 WRAPPER=$PLUGDIR/move-wrapper
+STATE=$PLUGDIR/installed-on
 TARGET=/usr/libexec/unraid/move
 STOCK=$TARGET.stock
+MOVER=/usr/local/sbin/mover
 
-mkdir -p "$PLUGDIR"
+mkdir -p "$PLUGDIR" "$EMHTTP" || { echo "ERROR: cannot create plugin directories"; exit 1; }
 
-# Never clobber an existing config.
+# --- preflight -------------------------------------------------------------
+if [ ! -e "$TARGET" ] && [ ! -e "$STOCK" ]; then
+  echo "ERROR: $TARGET not found - this Unraid build does not appear to use it."
+  logger -t mover.filter "install aborted: $TARGET missing"
+  exit 1
+fi
+
+if [ -f "$MOVER" ] && ! grep -q 'libexec/unraid/move' "$MOVER"; then
+  echo "WARNING: $MOVER does not reference $TARGET. This Unraid version may route"
+  echo "         the mover differently and the filter may have no effect."
+  logger -t mover.filter "WARNING: mover does not reference $TARGET - filter may be inert"
+fi
+
+# --- config (never clobber an existing one) --------------------------------
 if [ ! -f "$CONF" ]; then
 cat > "$CONF" <<'CONFEOF'
-# Mover Filter - patterns excluded from Unraid's mover.
+# Mover Filter - files matching these patterns are excluded from Unraid's mover.
+# Edit here or via Settings -> Utilities -> Mover Filter.
 #
-# One glob per line, matched against the FULL path of each file mover considers.
-# Implicitly anchored, so "*.part" means "any path ending in .part".
+# One glob per line, matched against the FULL path of each file the mover
+# considers. Patterns are implicitly anchored, so "*.part" means "any path
+# ending in .part".
 #   *   matches any run of characters (including /)
-#   ?   matches one character
-# Lines starting with # are ignored. Blank lines are ignored.
+#   ?   matches exactly one character
+# Lines starting with # are ignored, as are blank lines.
 #
-# Changes take effect on the next mover run; no restart needed.
+# Changes take effect on the next mover run - no restart needed.
+#
+# NOTE: a bare "*" would match everything and stop the mover moving anything at
+# all. It is ignored for that reason.
 
 *.part
 
@@ -55,14 +87,94 @@ cat > "$CONF" <<'CONFEOF'
 #*.!qB                  # qBittorrent incomplete files
 #*.crdownload           # Chrome partial downloads
 #*/incomplete/*         # anything under an "incomplete" directory
-#*/.unionfs/*
 CONFEOF
-echo "mover.filter: created default config at $CONF"
+  echo "mover.filter: created default config at $CONF"
 else
   echo "mover.filter: keeping existing config at $CONF"
 fi
 
-cat > "$WRAPPER" <<'WRAP'
+# --- settings UI -----------------------------------------------------------
+cat > "$PLUGDIR/MoverFilter.page" <<'PAGEEOF'
+Menu="Utilities"
+Title="Mover Filter"
+Icon="filter"
+---
+<?php
+/* Mover Filter - https://github.com/jasperchan/unraid-mover-filter */
+$conf    = '/boot/config/plugins/mover.filter/filters.conf';
+$wrapped = is_file('/usr/libexec/unraid/move.stock');
+$body    = is_readable($conf) ? file_get_contents($conf) : "*.part\n";
+
+$active = [];
+foreach (explode("\n", $body) as $l) {
+  $l = trim(preg_replace('/#.*/', '', $l));
+  if ($l !== '') $active[] = $l;
+}
+?>
+<div style="margin-bottom:12px">
+<?if ($wrapped):?>
+  <span style="color:#1aaa5d">&#10004; Active</span> &ndash; the mover is filtered.
+<?else:?>
+  <span style="color:#cc3300">&#10006; Not active</span> &ndash; the wrapper is not installed.
+  Reinstall the plugin, or check <i>Tools &rarr; System Log</i> for <code>mover.filter</code>.
+<?endif;?>
+</div>
+
+<form markdown="1" method="POST" action="/plugins/mover.filter/save.php" target="progressFrame">
+<input type="hidden" name="csrf_token" value="<?=$var['csrf_token']?>">
+
+_(Excluded patterns)_:
+: <textarea name="patterns" rows="14" cols="72" style="font-family:monospace" spellcheck="false"><?=htmlspecialchars($body)?></textarea>
+
+> One glob per line, matched against the full path of each file the mover considers.
+> Patterns are implicitly anchored, so `*.part` means "any path ending in .part".
+> `*` matches any run of characters including `/`; `?` matches one character.
+> Lines starting with `#` are ignored. A bare `*` is ignored, as it would stop the
+> mover moving anything at all.
+>
+> Changes take effect on the next mover run &ndash; nothing to restart.
+
+&nbsp;
+: <input type="submit" value="Apply"><input type="button" value="Done" onclick="done()">
+
+</form>
+
+<?if ($active):?>
+<p>Currently excluding: <code><?=htmlspecialchars(implode('</code>, <code>', $active))?></code></p>
+<?endif;?>
+PAGEEOF
+cat > "$PLUGDIR/save.php" <<'PHPEOF'
+<?php
+/* Mover Filter - writes filters.conf. https://github.com/jasperchan/unraid-mover-filter */
+$var = @parse_ini_file('/var/local/emhttp/var.ini');
+if (!isset($_POST['csrf_token'], $var['csrf_token']) || $_POST['csrf_token'] !== $var['csrf_token']) {
+  http_response_code(403);
+  exit("Invalid csrf_token\n");
+}
+$dir  = '/boot/config/plugins/mover.filter';
+$conf = "$dir/filters.conf";
+if (!is_dir($dir) && !@mkdir($dir, 0755, true)) {
+  http_response_code(500);
+  exit("Cannot create $dir\n");
+}
+$txt = str_replace("\r\n", "\n", (string)($_POST['patterns'] ?? ''));
+$txt = rtrim($txt, "\n") . "\n";
+if (@file_put_contents($conf, $txt) === false) {
+  http_response_code(500);
+  exit("Cannot write $conf\n");
+}
+$n = 0;
+foreach (explode("\n", $txt) as $l) {
+  $l = trim(preg_replace('/#.*/', '', $l));
+  if ($l !== '' && $l !== '*') $n++;
+}
+echo "Saved $conf - $n active pattern(s). Takes effect on the next mover run.\n";
+PHPEOF
+install -m 0644 "$PLUGDIR/MoverFilter.page" "$EMHTTP/MoverFilter.page"
+install -m 0644 "$PLUGDIR/save.php"         "$EMHTTP/save.php"
+
+# --- wrapper ---------------------------------------------------------------
+cat > "$WRAPPER" <<'WRAPEOF'
 #!/bin/bash
 # Wrapper for /usr/libexec/unraid/move
 # https://github.com/jasperchan/unraid-mover-filter
@@ -70,24 +182,25 @@ cat > "$WRAPPER" <<'WRAP'
 # Unraid's mover pipes `find <share> -depth` into this binary. We drop any path
 # matching a glob in filters.conf before the real binary sees it.
 #
-# Default pattern is *.part. Without it, mover relocates a partially-written
-# download to the array and the client keeps writing to it there: every write
-# becomes a parity read-modify-write, one download's files scatter across disks,
-# and if that disk fills the download fails with ENOSPC.
+# FAILURE POLICY
+#   Anything wrong with the FILTER (missing/unreadable config, no usable patterns)
+#   passes every path through unchanged, so the mover behaves exactly as stock
+#   Unraid. A broken filter must never silently stop the mover.
+#   The one hard failure is a missing move.stock - there is then no binary to do
+#   the work, so exit non-zero and log it.
 #
-# Unraid's own binary is kept at move.stock. The plugin reinstalls this wrapper
-# on every boot, because /usr/libexec is squashfs+overlay and does not persist.
+# Unraid's own binary is kept at move.stock. The plugin reinstalls this wrapper on
+# every boot, because /usr/libexec is squashfs+overlay and does not persist.
 
 CONF=/boot/config/plugins/mover.filter/filters.conf
 STOCK=/usr/libexec/unraid/move.stock
 
 if [ ! -x "$STOCK" ]; then
-  logger -t mover.filter "move.stock missing - refusing to run"
+  logger -t mover.filter "ERROR: $STOCK missing or not executable - cannot move anything"
   exit 1
 fi
 
-# No config, or no usable patterns: pass everything through untouched.
-if [ ! -f "$CONF" ]; then
+if [ ! -r "$CONF" ]; then
   exec "$STOCK" "$@"
 fi
 
@@ -99,10 +212,15 @@ awk -v CONF="$CONF" '
       gsub(/^[ \t]+|[ \t]+$/, "", line)
       if (line == "") continue
       re = line
-      gsub(/[.^$+(){}|\[\]\\]/, "\\\\&", re)   # escape regex metachars; leave * and ?
+      gsub(/[.^$+(){}|\[\]\\]/, "\\\\&", re)
       gsub(/\*/, ".*", re)
       gsub(/\?/, ".", re)
-      pats[++n] = "^" re "$"
+      anchored = "^" re "$"
+      if (anchored == "^.*$") {
+        system("logger -t mover.filter \"ignoring catch-all pattern - it would exclude everything\"")
+        continue
+      }
+      pats[++n] = anchored
     }
     close(CONF)
   }
@@ -114,14 +232,15 @@ awk -v CONF="$CONF" '
     if (skipped) system("logger -t mover.filter \"excluded " skipped " file(s) matching filters.conf\"")
   }
 ' | "$STOCK" "$@"
-WRAP
+WRAPEOF
 
-# A shebang at $TARGET means the wrapper is already installed. Do NOT back it up
-# in that case - that would overwrite Unraid's binary with the wrapper. Otherwise
-# take a fresh copy of whatever Unraid shipped, which keeps this correct across OS
-# upgrades that replace the binary.
+# A shebang at $TARGET means our wrapper is already installed. Do NOT back it up
+# then - that would overwrite Unraid's binary with the wrapper. Otherwise copy
+# whatever Unraid shipped. Because /usr/libexec resets from squashfs at boot, this
+# runs against the current OS binary every boot, so an Unraid upgrade is picked up
+# automatically and move.stock never goes stale.
 if head -c2 "$TARGET" 2>/dev/null | grep -q '#!'; then
-  echo "mover.filter: already installed, refreshing wrapper"
+  echo "mover.filter: already installed, refreshing wrapper and UI"
 else
   if ! cp -a "$TARGET" "$STOCK"; then
     echo "ERROR: could not back up $TARGET"; exit 1
@@ -129,14 +248,26 @@ else
   echo "mover.filter: backed up Unraid's binary to $STOCK"
 fi
 
-if ! install -m 0755 "$WRAPPER" "$TARGET"; then
-  echo "ERROR: could not install wrapper"; exit 1
+if [ ! -x "$STOCK" ] || head -c2 "$STOCK" 2>/dev/null | grep -q '#!'; then
+  echo "ERROR: $STOCK is not a usable binary - refusing to install."
+  echo "       Reboot to restore $TARGET from squashfs, then reinstall."
+  logger -t mover.filter "install aborted: $STOCK is not a valid binary"
+  exit 1
 fi
 
-logger -t mover.filter "active"
+if ! install -m 0755 "$WRAPPER" "$TARGET"; then
+  echo "ERROR: could not install wrapper to $TARGET"; exit 1
+fi
+
+printf 'unraid=%s installed=%s\n' \
+  "$(sed -n 's/^version=//p' /etc/unraid-version 2>/dev/null | tr -d '\"')" \
+  "$(date '+%F %T')" > "$STATE" 2>/dev/null
+
+logger -t mover.filter "active (unraid $(sed -n 's/^version=//p' /etc/unraid-version 2>/dev/null | tr -d '\"'))"
 echo ""
 echo "Mover Filter installed."
-echo "Patterns: $PLUGDIR/filters.conf   (default: *.part)"
+echo "Configure: Settings -> Utilities -> Mover Filter"
+echo "Patterns:  $CONF"
 echo ""
 ]]></INLINE>
 </FILE>
@@ -146,13 +277,21 @@ echo ""
 TARGET=/usr/libexec/unraid/move
 STOCK=$TARGET.stock
 if [ -f "$STOCK" ]; then
-  install -m 0755 "$STOCK" "$TARGET" && rm -f "$STOCK"
-  echo "mover.filter: restored Unraid's move binary"
+  if install -m 0755 "$STOCK" "$TARGET"; then
+    rm -f "$STOCK"
+    echo "mover.filter: restored Unraid's move binary"
+  else
+    echo "WARNING: could not restore $TARGET - a reboot restores it from squashfs"
+  fi
 else
   echo "mover.filter: no backup found; a reboot restores it from squashfs"
 fi
-# filters.conf is intentionally left in place so a reinstall keeps your patterns.
+rm -rf /usr/local/emhttp/plugins/mover.filter
+# filters.conf is deliberately left in place so a reinstall keeps your patterns.
 rm -f /boot/config/plugins/mover.filter/move-wrapper
+rm -f /boot/config/plugins/mover.filter/MoverFilter.page
+rm -f /boot/config/plugins/mover.filter/save.php
+rm -f /boot/config/plugins/mover.filter/installed-on
 rm -f /boot/config/plugins/mover.filter.plg
 logger -t mover.filter "removed"
 ]]></INLINE>
