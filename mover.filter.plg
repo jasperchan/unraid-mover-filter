@@ -135,7 +135,7 @@ fi
 
 logger -t mover.filter "active"
 echo ""
-echo "Mover Filter &version; installed."
+echo "Mover Filter installed."
 echo "Patterns: $PLUGDIR/filters.conf   (default: *.part)"
 echo ""
 ]]></INLINE>
