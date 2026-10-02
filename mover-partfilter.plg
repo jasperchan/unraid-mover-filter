@@ -1,0 +1,98 @@
+<?xml version='1.0' standalone='yes'?>
+<!DOCTYPE PLUGIN [
+<!ENTITY name      "mover-partfilter">
+<!ENTITY author    "jasperchan">
+<!ENTITY version   "2026.10.02">
+<!ENTITY launch    "">
+<!ENTITY gitURL    "https://raw.githubusercontent.com/jasperchan/unraid-mover-partfilter/main">
+<!ENTITY pluginURL "&gitURL;/&name;.plg">
+<!ENTITY plugdir   "/boot/config/plugins/&name;">
+]>
+
+<PLUGIN name="&name;" author="&author;" version="&version;" pluginURL="&pluginURL;" icon="filter"
+        min="6.9.0" support="https://github.com/jasperchan/unraid-mover-partfilter/issues">
+
+<CHANGES>
+###2026.10.02
+- Initial release. Excludes `*.part` from mover's file list so in-progress
+  downloads are never relocated from the cache pool to the array.
+</CHANGES>
+
+<FILE Run="/bin/bash">
+<INLINE><![CDATA[
+PLUGDIR=/boot/config/plugins/mover-partfilter
+WRAPPER=$PLUGDIR/move-wrapper
+TARGET=/usr/libexec/unraid/move
+STOCK=$TARGET.stock
+
+mkdir -p "$PLUGDIR"
+
+cat > "$WRAPPER" <<'WRAP'
+#!/bin/bash
+# Wrapper for /usr/libexec/unraid/move - see github.com/jasperchan/unraid-mover-partfilter
+#
+# Unraid's mover pipes `find <share> -depth` into this binary. We drop paths
+# ending in .part so in-progress downloads are never moved to the array.
+#
+# Without this, mover relocates a partially-downloaded file to the array and the
+# download client keeps writing to it there: every write becomes a parity
+# read-modify-write, one download's files scatter across several disks, and if
+# that disk fills the download dies with ENOSPC.
+#
+# The real binary is at move.stock. Reinstalled each boot by the .plg, because
+# /usr/libexec is squashfs+overlay and changes do not survive a reboot.
+
+STOCK=/usr/libexec/unraid/move.stock
+
+if [ ! -x "$STOCK" ]; then
+  logger -t mover-partfilter "move.stock missing - refusing to run"
+  exit 1
+fi
+
+awk '
+  /\.part$/ { skipped++; next }
+  { print }
+  END { if (skipped) system("logger -t mover-partfilter \"skipped " skipped " in-progress .part file(s)\"") }
+' | "$STOCK" "$@"
+WRAP
+
+# A shebang at $TARGET means our wrapper is already installed - do NOT stock it,
+# that would overwrite the real binary with the wrapper. Otherwise take a fresh
+# stock copy of whatever Unraid shipped, so OS upgrades are handled correctly.
+if head -c2 "$TARGET" 2>/dev/null | grep -q '#!'; then
+  echo "mover-partfilter: already wrapped, refreshing wrapper"
+else
+  if ! cp -a "$TARGET" "$STOCK"; then
+    echo "ERROR: could not stock $TARGET"; exit 1
+  fi
+  echo "mover-partfilter: saved Unraid's binary to $STOCK"
+fi
+
+if ! install -m 0755 "$WRAPPER" "$TARGET"; then
+  echo "ERROR: could not install wrapper"; exit 1
+fi
+
+logger -t mover-partfilter "active - mover will skip *.part"
+echo ""
+echo "mover-partfilter installed. Mover will no longer move *.part files."
+echo ""
+]]></INLINE>
+</FILE>
+
+<FILE Run="/bin/bash" Method="remove">
+<INLINE><![CDATA[
+TARGET=/usr/libexec/unraid/move
+STOCK=$TARGET.stock
+if [ -f "$STOCK" ]; then
+  install -m 0755 "$STOCK" "$TARGET" && rm -f "$STOCK"
+  echo "mover-partfilter: restored Unraid's move binary"
+else
+  echo "mover-partfilter: no saved binary; a reboot restores it from squashfs"
+fi
+rm -rf /boot/config/plugins/mover-partfilter
+rm -f /boot/config/plugins/mover-partfilter.plg
+logger -t mover-partfilter "removed"
+]]></INLINE>
+</FILE>
+
+</PLUGIN>
